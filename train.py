@@ -8,6 +8,8 @@ from utils import set_requires_grad, missing_region_L1, save_preview, save_check
 import torch
 import torch.nn.functional as F
 
+#please check the test number!
+TEST_NUM = 1
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data" / "processed"
 CHECKPOINT_DIR = ROOT / "checkpoints"
@@ -123,7 +125,13 @@ def train():
                 preview_generated,
                 preview_real,
                 preview_mask,
+                EPOCHS,
                 epoch,
+                TEST_NUM,
+                IMG_SIZE,
+                BATCH_SIZE,
+                LAMBDA_RECON,
+                len(dataset)
             )
 
             save_checkpoint(
@@ -131,7 +139,13 @@ def train():
                 discriminator,
                 optimizer_G,
                 optimizer_D,
+                EPOCHS,
                 epoch,
+                TEST_NUM,
+                IMG_SIZE,
+                BATCH_SIZE,
+                LAMBDA_RECON,
+                len(dataset)
             )
 
             print(f"{epoch} epoch 저장 완료")

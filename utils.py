@@ -20,7 +20,7 @@ def missing_region_L1(fake, real, mask):
 
     return difference.sum() / denominator
 
-def save_preview(masked, generated, real, mask, epoch):
+def save_preview(masked, generated, real, mask, totalepoch, epoch, test, img_size, batch_size, recon, pic_cnt):
     # 순서: 가려진 입력 | 생성 결과 | 정답
     composite = real * mask + generated * (1.0 - mask)
 
@@ -31,16 +31,16 @@ def save_preview(masked, generated, real, mask, epoch):
     preview = (preview + 1.0) / 2.0
     preview = preview.clamp(0, 1)
 
-    save_image(preview, SAMPLE_DIR / f"epoch_{epoch:03d}.jpg", nrow = 1)
+    save_image(preview, SAMPLE_DIR / f"test{test}_size{img_size}_batch{batch_size}_epoch{totalepoch:02d}_recon{recon:g}_{pic_cnt}pics_{epoch:03d}.jpg", nrow = 1)
 
-def save_checkpoint(generator, discriminator, optimizer_G, optimizer_D, epoch):
+def save_checkpoint(generator, discriminator, optimizer_G, optimizer_D, totalepoch, epoch, test, img_size, batch_size, recon, pic_cnt):
     torch.save(
         {
             "epoch": epoch,
-            "generator": generator,
+            "generator": generator.state_dict(),
             "discriminator": discriminator.state_dict(),
             "optimizer_G": optimizer_G.state_dict(),
             "optimizer_D": optimizer_D.state_dict(),
         },
-        CHECKPOINT_DIR / f"checkpoint_{epoch:03d}.pt"
+        CHECKPOINT_DIR / f"test{test}_size{img_size}_batch{batch_size}_epoch{totalepoch:02d}_recon{recon:g}_{pic_cnt}pics__epoch{epoch:03d}.pt"
     )
