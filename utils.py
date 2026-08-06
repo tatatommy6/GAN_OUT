@@ -4,6 +4,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parent
 SAMPLE_DIR = ROOT / "samples"
+CHECKPOINT_DIR = ROOT / "checkpoints"
 
 def set_requires_grad(model, requires_grad):
     for parameter in model.parameters():
@@ -37,6 +38,9 @@ def save_checkpoint(generator, discriminator, optimizer_G, optimizer_D, epoch):
         {
             "epoch": epoch,
             "generator": generator,
-            
-        }
+            "discriminator": discriminator.state_dict(),
+            "optimizer_G": optimizer_G.state_dict(),
+            "optimizer_D": optimizer_D.state_dict(),
+        },
+        CHECKPOINT_DIR / f"checkpoint_{epoch:03d}.pt"
     )
