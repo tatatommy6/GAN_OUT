@@ -2,29 +2,29 @@ from pathlib import Path
 from dataset import CustomDataset
 from models.generator import Generator
 from models.discriminator import Discriminator
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from utils import set_requires_grad, missing_region_L1, save_preview, save_checkpoint
 
 import torch
 import torch.nn.functional as F
 
-#please check the test number!
-TEST_NUM = 1
+# please check the test number!
+TEST_NUM = 2
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data" / "processed"
 CHECKPOINT_DIR = ROOT / "checkpoints"
 SAMPLE_DIR = ROOT / "samples"
 
-IMG_SIZE = 256
-BATCH_SIZE = 8
-EPOCHS = 5
+IMG_SIZE = 512
+BATCH_SIZE = 16
+EPOCHS = 80
 
-LR_GEN = 2e-4
-LR_DISC = 2e-4
+LR_GEN = 1e-4
+LR_DISC = 1e-4
 
 NUM_WORKERS = 4
-LAMBDA_RECON = 50.0
-SAVE_INTERVAL = 1
+LAMBDA_RECON = 50.0 # L1 loss 에 곱하는 가중치. 50이면 픽셀 복원 정화도를 비교적 강하게 강조
+SAVE_INTERVAL = 5
 
 def train():
     if torch.cuda.is_available():
@@ -35,50 +35,72 @@ def train():
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    full_dataset = CustomDataset(DATA_DIR, img_size = IMG_SIZE)
-    dataset = Subset(full_dataset, range(min(5000, len(full_dataset))))
+    full_dataset = CustomDataset(DATA_DIR, img_size = IMG_SIZE) # 임의 위치에서 정해진 크기로 크롭하고, 50%확률로 반전시키고, 밝기,채도,색조 변경, pytorch tenosr로 변경, 픽셀 범위 변경 등을 수행
+    # dataset = Subset(full_dataset, range(min(5000, len(full_dataset)))) #학습에 사용할 데이터 개수 제한 img_paths 의 앞쪽 5000장 선택
 
-    dataloader = DataLoader(dataset, 
-                            batch_size = BATCH_SIZE, 
+    dataloader = DataLoader(full_dataset, 
+                            batch_size = BATCH_SIZE, # 이미지 8개를 한 묶음 
                             shuffle = True,
-                            num_workers = NUM_WORKERS,
+                            num_workers = NUM_WORKERS, # worker 프로세스 4개가 데이터를 병렬로 준비. 각 worker는 이미지 열기, crop, flip, 색상 변형, 마스크 생성 등을 담당.
                             pin_memory = device.type == "cuda",
-                            persistent_workers = NUM_WORKERS > 0,
-                            drop_last = True)
-    generator = Generator().to(device)
-    discriminator = Discriminator().to(device)
+                            persistent_workers = NUM_WORKERS > 0, 
+                            # 일반적으로 각 에폭이 끝나면 worker 프로세스를 종료했다가 다음 에폭에 다시 만들 수 있는데 위 옵션을 사용하여 계속 유지하여 반복적인 프로세스 생성 비용을 줄일 수 있음
+                            drop_last = True) #마지막 배치의 이미지수가 8보다 작으면 그 배치를 버림
+    
+    generator = Generator().to(device) # generator 객체를 만들고 mps로 옮김
+    discriminator = Discriminator().to(device) # discriminator 객체를 만들고 mps로 옮김
 
+    # generator 와 discriminator 는 서로 다른 목료를 가지므로 optimizer도 따로 만듦
     optimizer_G = torch.optim.Adam(generator.parameters(), lr = LR_GEN, betas = (0.0, 0.9))
     optimizer_D = torch.optim.Adam(discriminator.parameters(), lr = LR_DISC, betas = (0.0, 0.9))
     start_epoch = 1
 
+    checkpoint_path = (CHECKPOINT_DIR / "test1_size512_batch16_epoch80_recon50_19767pics__epoch015.pt") #이어서 학습 할 때 
+    if checkpoint_path.exists():
+
+        checkpoint = torch.load(checkpoint_path, map_location = device)
+        generator.load_state_dict(checkpoint["generator"])
+        discriminator.load_state_dict(checkpoint["discriminator"])
+        optimizer_G.load_state_dict(checkpoint["optimizer_G"])
+        optimizer_D.load_state_dict(checkpoint["optimizer_D"])
+
+        start_epoch = checkpoint["epoch"] + 1
+
+        print(f"Checkpoint loaded: epoch {checkpoint["epoch"]}")
+        print(f"Resume training from epoch {start_epoch}")
+
+    #============학습 반복문===========
     for epoch in range(start_epoch, EPOCHS + 1):
-        generator.train()
+        # 두 모델 학습 모드로 변경
+        generator.train() 
         discriminator.train()
 
-        for batch_index, batch in enumerate(dataloader, start = 1):
-            real = batch["real"].to(device)
-            mask = batch["mask"].to(device)
-            masked = batch["masked"].to(device)
-            generator_input = batch["generator_input"].to(device)
+        for batch_index, batch in enumerate(dataloader, start = 1): # 배치 반복문
+            # 로드 된 이미지 / 배치 사이즈 = 한 에폭 당 반복 되는 횟수
+
+            # DataLoader 가 만든 딕셔너리에서 각각의 텐서를 꺼내 mps로 옮김
+            real = batch["real"].to(device) # shape : [8,3,256,256]
+            mask = batch["mask"].to(device) # shape: [8, 1, 256, 256]
+            masked = batch["masked"].to(device) # shpae: [8,3,256,256]
+            generator_input = batch["generator_input"].to(device) # shpae: [8,4,256,256]
             #===========training dicriminator===========
+            # D 값이 양수로 클수록 진짜라고 판단, 음수로 작을수록 가짜라고 판단
+            set_requires_grad(discriminator, True) # 모든 파라미터에 requires_grad 옵션 True로 설정
+            optimizer_D.zero_grad(set_to_none = True) # pytorch에서 backward로 계산한 grad는 누적되는데 배치마다 독립적으로 업데이트 할려고 gradient를 제거함
 
-            set_requires_grad(discriminator, True)
-            optimizer_D.zero_grad(set_to_none = True)
+            # Autocasting
+            with torch.autocast(device_type="cuda", dtype = torch.bfloat16):
+                with torch.no_grad(): #generator로 가짜 이미지 생성
+                    generated = generator(generator_input)
 
-            with torch.no_grad():
-                generated = generator(generator_input)
+                fake_composite = (real * mask + generated * (1.0 - mask)) # generator 출력 전체를 그대로 discriminator에 넣지 않고 원본 영역과 생성 영역을 합친 최종 이미지를 만듦
+                real_score = discriminator(real, mask) #input: 실제 완성 이미지 + 마스크 , output: 
+                fake_score = discriminator(fake_composite.detach(), mask)
 
-            fake_composite = (
-                real * mask + generated * (1.0 - mask)
-            )
-            real_score = discriminator(real, mask)
-            fake_score = discriminator(fake_composite.detach(), mask)
-
-            #hinge GAN loss
-            loss_d_real = F.relu(1.0 - real_score).mean()
-            loss_d_fake = F.relu(1.0 + fake_score).mean()
-            loss_d = loss_d_real + loss_d_fake
+                #hinge GAN loss
+                loss_d_real = F.relu(1.0 - real_score).mean()
+                loss_d_fake = F.relu(1.0 + fake_score).mean()
+                loss_d = loss_d_real + loss_d_fake
 
             loss_d.backward()
             optimizer_D.step()
@@ -87,16 +109,17 @@ def train():
 
             set_requires_grad(discriminator, False)
             optimizer_G.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype = torch.bfloat16):
+                generated = generator(generator_input)
 
-            generated = generator(generator_input)
+                fake_composite = (real * mask + generated * (1.0 - mask))
 
-            fake_composite = (real * mask + generated * (1.0 - mask))
+                fake_score = discriminator(fake_composite, mask) # generator가 만든 합성 이미지를 discriminator에 넣음. generator는 fake_score를 높이는 방향으로 학습됨
 
-            fake_score = discriminator(fake_composite, mask)
+                loss_g_adv = -fake_score.mean()
+                loss_g_recon = missing_region_L1(generated, real, mask)
+                loss_g = (loss_g_adv + LAMBDA_RECON * loss_g_recon)
 
-            loss_g_adv = -fake_score.mean()
-            loss_g_recon = missing_region_L1(generated, real, mask)
-            loss_g = (loss_g_adv + LAMBDA_RECON * loss_g_recon)
             loss_g.backward()
             optimizer_G.step()
 
@@ -107,7 +130,7 @@ def train():
                 mask.detach(),
             )
 
-            if batch_index % 1 == 0:
+            if batch_index % 1 == 0: # 1 에폭마다 출력
                 print(f"Epoch [{epoch}/{EPOCHS}] "
                     f"Batch [{batch_index}/{len(dataloader)}] "
                     f"D: {loss_d.item():.4f} "
@@ -131,7 +154,7 @@ def train():
                 IMG_SIZE,
                 BATCH_SIZE,
                 LAMBDA_RECON,
-                len(dataset)
+                len(full_dataset)
             )
 
             save_checkpoint(
@@ -145,7 +168,7 @@ def train():
                 IMG_SIZE,
                 BATCH_SIZE,
                 LAMBDA_RECON,
-                len(dataset)
+                len(full_dataset)
             )
 
             print(f"{epoch} epoch 저장 완료")

@@ -25,7 +25,7 @@ class CustomDataset(Dataset): # 저장된 완성 이미지에서 매번 무작�
 
         self.transform = transforms.Compose([
             transforms.RandomCrop(img_size), # 이미지를 랜덤 위치에서 512 * 512 로 크롭
-            transforms.RandomHorizontalFlip(), # 50%확률로 상하반전
+            transforms.RandomHorizontalFlip(), # 50% 확률로 좌우반전
             transforms.ColorJitter( # 밝기 채도 대비를 조금씩 변경
                 brightness = 0.1,
                 contrast = 0.1,

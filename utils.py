@@ -43,6 +43,11 @@ def save_preview(masked, generated, real, mask, totalepoch, epoch, test, img_siz
     save_image(preview, SAMPLE_DIR / f"test{test}_size{img_size}_batch{batch_size}_epoch{totalepoch:02d}_recon{recon:g}_{pic_cnt}pics_{epoch:03d}.jpg", nrow = 1)
 
 def save_checkpoint(generator, discriminator, optimizer_G, optimizer_D, totalepoch, epoch, test, img_size, batch_size, recon, pic_cnt):
+    checkpoint_path = CHECKPOINT_DIR / (
+            f"test{test}_size{img_size}_batch{batch_size}_"
+            f"epoch{totalepoch:02d}_recon{recon:g}_"
+            f"{pic_cnt}pics__epoch{epoch:03d}.pt")
+    
     torch.save( #.pt 파일에 이런 내용이 저장됨. 
         {
             "epoch": epoch,
@@ -51,5 +56,18 @@ def save_checkpoint(generator, discriminator, optimizer_G, optimizer_D, totalepo
             "optimizer_G": optimizer_G.state_dict(),
             "optimizer_D": optimizer_D.state_dict(),
         },
-        CHECKPOINT_DIR / f"test{test}_size{img_size}_batch{batch_size}_epoch{totalepoch:02d}_recon{recon:g}_{pic_cnt}pics__epoch{epoch:03d}.pt"
+        checkpoint_path
     )
+
+    # 현재 테스트의 체크포인트만 찾기
+    pattern = (
+        f"test{test}_size{img_size}_batch{batch_size}_"
+        f"epoch{totalepoch:02d}_recon{recon:g}_"
+        f"{pic_cnt}pics__epoch*.pt")
+    checkpoints = sorted(CHECKPOINT_DIR.glob(pattern))
+
+    # 최근 두개의 체크포인트만 남기기
+    while len(checkpoints) > 2:
+        old_checkpoint = checkpoints.pop(0)
+        old_checkpoint.unlink()
+        print(f"Deleted old checkpoint: {old_checkpoint.name}")
