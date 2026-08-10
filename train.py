@@ -94,34 +94,34 @@ def train():
                     generated = generator(generator_input)
 
                 fake_composite = (real * mask + generated * (1.0 - mask)) # generator 출력 전체를 그대로 discriminator에 넣지 않고 원본 영역과 생성 영역을 합친 최종 이미지를 만듦
-                real_score = discriminator(real, mask) #input: 실제 완성 이미지 + 마스크 , output: 
+                real_score = discriminator(real, mask)
                 fake_score = discriminator(fake_composite.detach(), mask)
 
                 #hinge GAN loss
-                loss_d_real = F.relu(1.0 - real_score).mean()
-                loss_d_fake = F.relu(1.0 + fake_score).mean()
-                loss_d = loss_d_real + loss_d_fake
+                loss_d_real = F.relu(1.0 - real_score).mean() # real_score 가 최소 1이상이 되도록 유도
+                loss_d_fake = F.relu(1.0 + fake_score).mean() # fake_score 가 최소 -1이하가 되도록 유도
+                loss_d = loss_d_real + loss_d_fake # 실제 이미지 손실과 가짜 이미지 손실을 더한 판별자의 최종 손실
 
-            loss_d.backward()
-            optimizer_D.step()
+            loss_d.backward() # 역전파
+            optimizer_D.step() # 파라미터 업데이트
 
             #===========training generator===========
 
-            set_requires_grad(discriminator, False)
-            optimizer_G.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype = torch.bfloat16):
+            set_requires_grad(discriminator, False) # generator 학습하는 동안 discriminator 파라미터가 업데이트 되지 않도록 동결
+            optimizer_G.zero_grad(set_to_none=True) # 이전 배치에서 생성자에 남아있는 gradient를 초기화함
+            with torch.autocast(device_type="cuda", dtype = torch.bfloat16): # 내부 연산 일부를 bfloat16으로 실행하여 GPU 메모리 사용량을 줄이고 연산 속도를 높임
                 generated = generator(generator_input)
 
-                fake_composite = (real * mask + generated * (1.0 - mask))
+                fake_composite = (real * mask + generated * (1.0 - mask)) # 원본 이미지의 보존 영역과 생성자가 복원한 영역을 합쳐 최종 학습 이미지를 만듦
 
                 fake_score = discriminator(fake_composite, mask) # generator가 만든 합성 이미지를 discriminator에 넣음. generator는 fake_score를 높이는 방향으로 학습됨
 
-                loss_g_adv = -fake_score.mean()
-                loss_g_recon = missing_region_L1(generated, real, mask)
-                loss_g = (loss_g_adv + LAMBDA_RECON * loss_g_recon)
+                loss_g_adv = -fake_score.mean() # generator의 daversarial loss 값
+                loss_g_recon = missing_region_L1(generated, real, mask) # 생성 결과와 실제 이미지 사이의 L1 복원 손실을 계산
+                loss_g = (loss_g_adv + LAMBDA_RECON * loss_g_recon) # generator의 최종 손실
 
-            loss_g.backward()
-            optimizer_G.step()
+            loss_g.backward() # 역전파
+            optimizer_G.step() # 파라미터 업데이트
 
             preview_data = (
                 masked.detach(),
