@@ -81,7 +81,7 @@ def train():
     checkpoint_path = (CHECKPOINT_DIR / "test2_size512_batch16_epoch80_recon50_19767pics__epoch015.pt") #이어서 학습 할 때
     if checkpoint_path.exists():
 
-        checkpoint = torch.load(checkpoint_path, map_location = device)
+        checkpoint = torch.load(checkpoint_path, map_location = device, weights_only = True)
         generator.load_state_dict(checkpoint["generator"])
         discriminator.load_state_dict(checkpoint["discriminator"])
         optimizer_G.load_state_dict(checkpoint["optimizer_G"])
