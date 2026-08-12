@@ -1,5 +1,6 @@
 from pathlib import Path
 from torchvision.utils import save_image
+import torch.nn.functional as F
 import torch
 
 #폴더 지정 (자동 생성 X)
@@ -71,3 +72,17 @@ def save_checkpoint(generator, discriminator, optimizer_G, optimizer_D, totalepo
         old_checkpoint = checkpoints.pop(0)
         old_checkpoint.unlink()
         print(f"Deleted old checkpoint: {old_checkpoint.name}")
+
+# 판별기(discriminator) 점수의 평균을 낼 때 생성 영역과 경계에 더 큰 가중치를 주는 함수
+def weighted_patch_mean(score, mask): # score: [B, 1, 31, 31], mask: [B, 1, 512, 512]
+    hole = 1.0 - mask # 마스크를 뒤집음 
+
+    dilated = F.max_pool2d(hole, kernel_size = 33, stride = 1, padding = 16) # 생성 영역을 주변 16픽셀만큼 확장(생성 영역 근처의 경계를 찾기 위한 준비)
+    boundray = (dilated - hole).clamp(0.0, 1.0) # 확장된 영역에서 원래 생성 영역을 뺴서 경계 영역만 남김
+
+    # D의 패치 해상도(31*31)로 축소
+    hole = F.interpolate(hole, size = score.shape[-2:], mode = "area") # 원래 판별기 출력인 31*31로 줄임
+    boundray = F.interpolate(boundray, size = score.shape[-2:], mode = "area")
+    weight = 0.25 + 1.0 * hole + 0.5 * boundray # 생성 영역은 일반 영역보다 5배, 경계는 3배 중요하게 반영
+
+    return (score * weight.sum() / weight.sum().clamp_min(1e-6)) # 가중치를 곱한 뒤 평균을 냄

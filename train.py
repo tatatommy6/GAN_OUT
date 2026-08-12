@@ -3,7 +3,7 @@ from dataset import CustomDataset
 from models.generator import Generator
 from models.discriminator import Discriminator
 from torch.utils.data import DataLoader
-from utils import set_requires_grad, missing_region_L1, save_preview, save_checkpoint
+from utils import set_requires_grad, missing_region_L1, save_preview, save_checkpoint, weighted_patch_mean
 
 import torch
 import torch.nn.functional as F
@@ -121,8 +121,8 @@ def train():
                 fake_score = discriminator(fake_composite.detach(), mask)
 
                 #hinge GAN loss
-                loss_d_real = F.relu(1.0 - real_score).mean() # real_score 가 최소 1이상이 되도록 유도
-                loss_d_fake = F.relu(1.0 + fake_score).mean() # fake_score 가 최소 -1이하가 되도록 유도
+                loss_d_real = weighted_patch_mean(F.relu(1.0 - real_score), mask)
+                loss_d_fake = weighted_patch_mean(F.relu(1.0 + fake_score), mask)
                 loss_d = loss_d_real + loss_d_fake # 실제 이미지 손실과 가짜 이미지 손실을 더한 판별자의 최종 손실
 
             loss_d.backward() # 역전파
@@ -139,7 +139,7 @@ def train():
 
                 fake_score = discriminator(fake_composite, mask) # generator가 만든 합성 이미지를 discriminator에 넣음. generator는 fake_score를 높이는 방향으로 학습됨
 
-                loss_g_adv = -fake_score.mean() # generator의 daversarial loss 값
+                loss_g_adv = -weighted_patch_mean(fake_score, mask)
                 loss_g_recon = missing_region_L1(generated, real, mask) # 생성 결과와 실제 이미지 사이의 L1 복원 손실을 계산
                 loss_g = (loss_g_adv + LAMBDA_RECON * loss_g_recon) # generator의 최종 손실
 
