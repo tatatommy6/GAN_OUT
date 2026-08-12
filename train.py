@@ -23,7 +23,7 @@ LR_GEN = 1e-4
 LR_DISC = 1e-4
 
 NUM_WORKERS = 4
-LAMBDA_RECON = 50.0 # L1 loss 에 곱하는 가중치. 50이면 픽셀 복원 정화도를 비교적 강하게 강조
+LAMBDA_RECON = 10.0 # L1 loss 에 곱하는 가중치. 50이면 픽셀 복원 정화도를 비교적 강하게 강조
 SAVE_INTERVAL = 5
 
 def train():
@@ -35,8 +35,17 @@ def train():
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    full_dataset = CustomDataset(DATA_DIR, img_size = IMG_SIZE) # 임의 위치에서 정해진 크기로 크롭하고, 50%확률로 반전시키고, 밝기,채도,색조 변경, pytorch tenosr로 변경, 픽셀 범위 변경 등을 수행
-    # dataset = Subset(full_dataset, range(min(5000, len(full_dataset)))) #학습에 사용할 데이터 개수 제한 img_paths 의 앞쪽 5000장 선택
+    full_dataset = CustomDataset(
+        DATA_DIR,
+        img_size=IMG_SIZE,
+        fixed_preview=False,
+    ) # 학습용: 랜덤 crop, flip, color jitter, 랜덤 마스크 사용
+
+    preview_dataset = CustomDataset(
+        DATA_DIR,
+        img_size=IMG_SIZE,
+        fixed_preview=True,
+    ) # preview용: 같은 이미지와 같은 마스크 사용
 
     dataloader = DataLoader(full_dataset, 
                             batch_size = BATCH_SIZE, # 이미지 8개를 한 묶음 
@@ -46,6 +55,20 @@ def train():
                             persistent_workers = NUM_WORKERS > 0, 
                             # 일반적으로 각 에폭이 끝나면 worker 프로세스를 종료했다가 다음 에폭에 다시 만들 수 있는데 위 옵션을 사용하여 계속 유지하여 반복적인 프로세스 생성 비용을 줄일 수 있음
                             drop_last = True) #마지막 배치의 이미지수가 8보다 작으면 그 배치를 버림
+
+    preview_loader = DataLoader(
+        preview_dataset,
+        batch_size=4,
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+    )
+
+    fixed_preview = next(iter(preview_loader))
+    fixed_preview = {
+        key: value.to(device)
+        for key, value in fixed_preview.items()
+    }
     
     generator = Generator().to(device) # generator 객체를 만들고 mps로 옮김
     discriminator = Discriminator().to(device) # discriminator 객체를 만들고 mps로 옮김
@@ -55,7 +78,7 @@ def train():
     optimizer_D = torch.optim.Adam(discriminator.parameters(), lr = LR_DISC, betas = (0.0, 0.9))
     start_epoch = 1
 
-    checkpoint_path = (CHECKPOINT_DIR / "test1_size512_batch16_epoch80_recon50_19767pics__epoch015.pt") #이어서 학습 할 때 
+    checkpoint_path = (CHECKPOINT_DIR / "test2_size512_batch16_epoch80_recon50_19767pics__epoch015.pt") #이어서 학습 할 때
     if checkpoint_path.exists():
 
         checkpoint = torch.load(checkpoint_path, map_location = device)
@@ -123,13 +146,6 @@ def train():
             loss_g.backward() # 역전파
             optimizer_G.step() # 파라미터 업데이트
 
-            preview_data = (
-                masked.detach(),
-                generated.detach(),
-                real.detach(),
-                mask.detach(),
-            )
-
             if batch_index % 1 == 0: # 1 에폭마다 출력
                 print(f"Epoch [{epoch}/{EPOCHS}] "
                     f"Batch [{batch_index}/{len(dataloader)}] "
@@ -138,23 +154,28 @@ def train():
                     f"Adv: {loss_g_adv.item():.4f} "
                     f"L1: {loss_g_recon.item():.4f}")
 
-        if epoch % SAVE_INTERVAL == 0 and preview_data is not None: # type: ignore
-            preview_masked, preview_generated, preview_real, preview_mask = (
-                preview_data
-            ) # type: ignore
+        if epoch % SAVE_INTERVAL == 0:
+            generator.eval()
+
+            with torch.no_grad():
+                preview_generated = generator(
+                    fixed_preview["generator_input"]
+                )
+
+            generator.train()
 
             save_preview(
-                preview_masked,
+                fixed_preview["masked"],
                 preview_generated,
-                preview_real,
-                preview_mask,
+                fixed_preview["real"],
+                fixed_preview["mask"],
                 EPOCHS,
                 epoch,
                 TEST_NUM,
                 IMG_SIZE,
                 BATCH_SIZE,
                 LAMBDA_RECON,
-                len(full_dataset)
+                len(full_dataset),
             )
 
             save_checkpoint(

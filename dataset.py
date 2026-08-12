@@ -2,6 +2,7 @@ from pathlib import Path
 import random
 import torch
 from PIL import Image
+from typing import cast
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -14,11 +15,12 @@ SAMPLE_DIR = ROOT / "samples"
 extensions = {".jpg", ".jpeg", ".png", ".webp"}
 
 class CustomDataset(Dataset): # 저장된 완성 이미지에서 매번 무작위로 일부 영역을 가려서 -> 원래 완성된 이미지 학습 쌍을 만듦
-    def __init__(self,img_dir,img_size = 512):
+    def __init__(self,img_dir,img_size = 512, fixed_preview = False):
         self.img_size = img_size
+        self.fixed_preview = fixed_preview
 
-        self.img_paths = [path for path in img_dir.rglob("*") #data/processed 아래를 재귀적으로 검색하고 이미지 경로 저장 :rglob()
-                        if path.is_file() and path.suffix.lower() in extensions] #확장자명을 소문자로 바꿔서 extensions 안에 있는지 확인
+        self.img_paths = sorted([path for path in img_dir.rglob("*") #data/processed 아래를 재귀적으로 검색하고 이미지 경로 저장 :rglob()
+                        if path.is_file() and path.suffix.lower() in extensions]) #확장자명을 소문자로 바꿔서 extensions 안에 있는지 확인
         
         if not self.img_paths:
             raise RuntimeError(f"이미지가 없습니다: {img_dir}")
@@ -38,6 +40,18 @@ class CustomDataset(Dataset): # 저장된 완성 이미지에서 매번 무작�
                 std = (0.5,0.5,0.5),
             ),
         ])
+
+        self.preview_transform = transforms.Compose([
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean = (0.5, 0.5, 0.5),
+                std = (0.5, 0.5, 0.5),
+            )
+        ])
+        self.fixed_mask = torch.ones(1, img_size, img_size)
+        self.fixed_mask[:, :, :img_size // 3] = 0
+
         print(f"train image count:{len(self.img_paths)}")
 
     def __len__(self): #데이터셋에 들어있는 전체 이미지 수를 return
@@ -79,11 +93,18 @@ class CustomDataset(Dataset): # 저장된 완성 이미지에서 매번 무작�
         try:
             with Image.open(img_path) as pil_image:
                 pil_image = pil_image.convert("RGB")
-                image_tensor: torch.Tensor = self.transform(pil_image) # type: ignore
+                transform = (self.preview_transform
+                            if self.fixed_preview
+                            else self.transform)
+                image_tensor = cast(torch.Tensor, transform(pil_image))
+
         except (OSError, ValueError):
             return self.__getitem__(random.randrange(len(self)))
 
-        mask = self.create_outpainting_mask() #무작위 마스크 생성
+        if self.fixed_preview:
+            mask = self.fixed_mask.clone()
+        else:
+            mask = self.create_outpainting_mask()
 
         masked_image = image_tensor * mask # 이미지에 마스크를 곱하여 생성 영역을 검은색으로 가림
         # 마스크가 1인곳은 이미지 유지, 0인 곳은 픽셀이 0. 따라서 검은색이 됨
