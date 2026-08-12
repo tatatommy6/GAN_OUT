@@ -85,4 +85,4 @@ def weighted_patch_mean(score, mask): # score: [B, 1, 31, 31], mask: [B, 1, 512,
     boundray = F.interpolate(boundray, size = score.shape[-2:], mode = "area")
     weight = 0.25 + 1.0 * hole + 0.5 * boundray # 생성 영역은 일반 영역보다 5배, 경계는 3배 중요하게 반영
 
-    return (score * weight.sum() / weight.sum().clamp_min(1e-6)) # 가중치를 곱한 뒤 평균을 냄
+    return (score * weight).sum() / weight.sum().clamp_min(1e-6) # 가중치를 곱한 뒤 평균을 냄
