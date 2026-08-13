@@ -89,7 +89,7 @@ def train():
 
         start_epoch = checkpoint["epoch"] + 1
 
-        print(f"Checkpoint loaded: epoch {checkpoint["epoch"]}")
+        print(f"Checkpoint loaded: epoch {checkpoint['epoch']}")
         print(f"Resume training from epoch {start_epoch}")
 
     #============학습 반복문===========
@@ -146,7 +146,7 @@ def train():
             loss_g.backward() # 역전파
             optimizer_G.step() # 파라미터 업데이트
 
-            if batch_index % 1 == 0: # 1 에폭마다 출력
+            if batch_index % 50 == 0: # 1 배치마다 출력
                 print(f"Epoch [{epoch}/{EPOCHS}] "
                     f"Batch [{batch_index}/{len(dataloader)}] "
                     f"D: {loss_d.item():.4f} "
