@@ -2,10 +2,13 @@ from pathlib import Path
 from dataset import CustomDataset
 from models.generator import Generator
 from models.discriminator import Discriminator
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
+from torchmetrics.image import StructuralSimilarityIndexMeasure # 구조적 유사도 지수: 두 이미지의 화질이나 유사도를 느끼게 평가하는 지표
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity # 학습된 지각적 이미지 패치 유사도: 라고 부릅니다. 두 이미지 사이의 거리를 측정하여 사람이 느끼는 시각적 차이와 비슷하게 유사도를 평가하는 딥러닝 기반 지표
 from utils import set_requires_grad, missing_region_L1, save_preview, save_checkpoint, weighted_patch_mean
 
 import torch
+import random
 import torch.nn.functional as F
 
 # please check the test number!
@@ -18,13 +21,59 @@ SAMPLE_DIR = ROOT / "samples"
 IMG_SIZE = 512
 BATCH_SIZE = 16
 EPOCHS = 80
+VAL_RATIO = 0.1
+SPLIT_SEED = 42
+NUM_WORKERS = 4
+LAMBDA_RECON = 10.0 # L1 loss 에 곱하는 가중치. 50이면 픽셀 복원 정화도를 비교적 강하게 강조
+SAVE_INTERVAL = 5
 
 LR_GEN = 1e-4
 LR_DISC = 1e-4
 
-NUM_WORKERS = 4
-LAMBDA_RECON = 10.0 # L1 loss 에 곱하는 가중치. 50이면 픽셀 복원 정화도를 비교적 강하게 강조
-SAVE_INTERVAL = 5
+@torch.no_grad()
+def validation(generator, val_loader, device, ssim_metric, lpips_metric):
+    generator.eval()
+
+    total_L1 = 0.0
+    total_ssim = 0.0
+    total_lpips = 0.0
+    total_images = 0.0
+
+    for batch in val_loader:
+        real = batch["real"].to(device)
+        mask = batch["mask"].to(device)
+        gen_input = batch["generator_input"].to(device)
+        generated = generator(gen_input)
+
+        # 보존 영역은 원본을 사용하고 생성 영역만 생성 결과를 사용
+        composite = real * mask + generated * (1.0 - mask)
+
+        batch_size = real.shape[0]
+
+        # 생성 영역에 대해서만 계산되는 L1 값
+        loss_l1 = missing_region_L1(generated, real, mask)
+
+        # ssis는 입력 범위가 [0, 1]이므로 기존 [-1, 1]인 범위를 적절한 범위로 변경
+        composite_01 = ((composite + 1.0) / 2.0).clamp(0, 1)
+        real_01 = ((real + 1.0) / 2.0).clamp(0, 1)
+
+        ssim_value = ssim_metric(composite_01, real_01) # 값 집어넣음
+
+        # lpips는 원래부터 범위가 [-1, 1] 이므로 변경하지 않고 사용
+        lpips_value = lpips_metric(composite, real)
+
+        total_L1 += loss_l1.item() * batch_size
+        total_ssim += ssim_value.item() * batch_size
+        total_lpips += lpips_value.item() * batch_size
+        total_images += batch_size
+    generator.train()
+
+    return {
+        "l1": total_L1 / total_images,
+        "ssim": total_ssim / total_images,
+        "lpips": total_lpips / total_images,
+        }
+
 
 def train():
     if torch.cuda.is_available():
@@ -35,19 +84,36 @@ def train():
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    full_dataset = CustomDataset(
+    train_base_dataset = CustomDataset(
         DATA_DIR,
         img_size=IMG_SIZE,
         fixed_preview=False,
     ) # 학습용: 랜덤 crop, flip, color jitter, 랜덤 마스크 사용
 
-    preview_dataset = CustomDataset(
+    val_base_dataset = CustomDataset(
         DATA_DIR,
         img_size=IMG_SIZE,
         fixed_preview=True,
     ) # preview용: 같은 이미지와 같은 마스크 사용
 
-    dataloader = DataLoader(full_dataset, 
+    dataset_size = len(train_base_dataset)
+    indices = list(range(dataset_size))
+
+    # 실행할 때마다 같은 train/val 분할을 사용
+    split_generator = torch.Generator().manual_seed(SPLIT_SEED) # 난수 생성기
+    indices = torch.randperm(dataset_size, generator = split_generator) # randperm: 0부터 n-1까지의 정수를 무작위로 섞어서 1차원 텐서로 변환
+
+    val_size = int(dataset_size * VAL_RATIO)
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+
+    train_dataset = Subset(train_base_dataset, train_indices)
+    val_dataset = Subset(val_base_dataset, val_indices)
+
+    print(f"Train images: {len(train_dataset)}")
+    print(f"Validation images: {len(val_dataset)}")
+
+    dataloader = DataLoader(train_dataset, 
                             batch_size = BATCH_SIZE, # 이미지 8개를 한 묶음 
                             shuffle = True,
                             num_workers = NUM_WORKERS, # worker 프로세스 4개가 데이터를 병렬로 준비. 각 worker는 이미지 열기, crop, flip, 색상 변형, 마스크 생성 등을 담당.
@@ -56,8 +122,16 @@ def train():
                             # 일반적으로 각 에폭이 끝나면 worker 프로세스를 종료했다가 다음 에폭에 다시 만들 수 있는데 위 옵션을 사용하여 계속 유지하여 반복적인 프로세스 생성 비용을 줄일 수 있음
                             drop_last = True) #마지막 배치의 이미지수가 8보다 작으면 그 배치를 버림
 
+    val_loader = DataLoader(val_dataset,
+                            batch_size = BATCH_SIZE,
+                            shuffle = False,
+                            num_workers = NUM_WORKERS,
+                            pin_memory = device.type == "cuda",
+                            persistent_workers = NUM_WORKERS > 0,
+                            drop_last = False)
+
     preview_loader = DataLoader(
-        preview_dataset,
+        val_dataset,
         batch_size=4,
         shuffle=False,
         num_workers=0,
@@ -175,7 +249,7 @@ def train():
                 IMG_SIZE,
                 BATCH_SIZE,
                 LAMBDA_RECON,
-                len(full_dataset),
+                len(train_base_dataset),
             )
 
             save_checkpoint(
@@ -189,7 +263,7 @@ def train():
                 IMG_SIZE,
                 BATCH_SIZE,
                 LAMBDA_RECON,
-                len(full_dataset)
+                len(train_base_dataset)
             )
 
             print(f"{epoch} epoch 저장 완료")
