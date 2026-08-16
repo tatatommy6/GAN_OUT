@@ -34,9 +34,10 @@ LR_DISC = 1e-4
 def validation(generator, val_loader, device, ssim_metric, lpips_metric):
     generator.eval()
 
+    ssim_metric.reset()
+    lpips_metric.reset()
+    
     total_L1 = 0.0
-    total_ssim = 0.0
-    total_lpips = 0.0
     total_images = 0.0
 
     for batch in val_loader:
@@ -51,28 +52,30 @@ def validation(generator, val_loader, device, ssim_metric, lpips_metric):
         batch_size = real.shape[0]
 
         # 생성 영역에 대해서만 계산되는 L1 값
-        loss_l1 = missing_region_L1(generated, real, mask)
+        loss_L1 = missing_region_L1(generated, real, mask)
 
         # ssis는 입력 범위가 [0, 1]이므로 기존 [-1, 1]인 범위를 적절한 범위로 변경
         composite_01 = ((composite + 1.0) / 2.0).clamp(0, 1)
         real_01 = ((real + 1.0) / 2.0).clamp(0, 1)
 
-        ssim_value = ssim_metric(composite_01, real_01) # 값 집어넣음
+        ssim_metric.update(composite_01, real_01)
+        lpips_metric.update(composite, real)
 
-        # lpips는 원래부터 범위가 [-1, 1] 이므로 변경하지 않고 사용
-        lpips_value = lpips_metric(composite, real)
-
-        total_L1 += loss_l1.item() * batch_size
-        total_ssim += ssim_value.item() * batch_size
-        total_lpips += lpips_value.item() * batch_size
+        total_L1 += loss_L1.item() * batch_size
         total_images += batch_size
-    generator.train()
 
-    return {
+    result = {
         "l1": total_L1 / total_images,
-        "ssim": total_ssim / total_images,
-        "lpips": total_lpips / total_images,
+        "ssim": ssim_metric.compute().item(),
+        "lpips": lpips_metric.compute().item(),
         }
+
+    # metric이 GPU tensor를 계속 보관하지 않도록 정리
+    ssim_metric.reset()
+    lpips_metric.reset()
+
+    generator.train()
+    return result
 
 
 def train():
@@ -97,13 +100,12 @@ def train():
     ) # preview용: 같은 이미지와 같은 마스크 사용
 
     dataset_size = len(train_base_dataset)
-    indices = list(range(dataset_size))
 
     # 실행할 때마다 같은 train/val 분할을 사용
     split_generator = torch.Generator().manual_seed(SPLIT_SEED) # 난수 생성기
-    indices = torch.randperm(dataset_size, generator = split_generator) # randperm: 0부터 n-1까지의 정수를 무작위로 섞어서 1차원 텐서로 변환
+    indices = torch.randperm(dataset_size, generator = split_generator).tolist() # randperm: 0부터 n-1까지의 정수를 무작위로 섞어서 1차원 텐서로 변환
 
-    val_size = int(dataset_size * VAL_RATIO)
+    val_size = min(int(dataset_size * VAL_RATIO), 512)
     val_indices = indices[:val_size]
     train_indices = indices[val_size:]
 
@@ -165,6 +167,20 @@ def train():
 
         print(f"Checkpoint loaded: epoch {checkpoint['epoch']}")
         print(f"Resume training from epoch {start_epoch}")
+
+    generator = Generator().to(device)
+    discriminator = Discriminator().to(device)
+
+    ssim_metric = StructuralSimilarityIndexMeasure(
+        data_range=1.0,
+    ).to(device)
+
+    lpips_metric = LearnedPerceptualImagePatchSimilarity(
+        net_type="alex",
+        normalize=False,
+    ).to(device)
+
+    best_val_lpips = float("inf")
 
     #============학습 반복문===========
     for epoch in range(start_epoch, EPOCHS + 1):
@@ -228,6 +244,44 @@ def train():
                     f"Adv: {loss_g_adv.item():.4f} "
                     f"L1: {loss_g_recon.item():.4f}")
 
+        val_metrics = validation(generator, val_loader, device, ssim_metric, lpips_metric)
+        print(
+            f"Validation Epoch [{epoch}/{EPOCHS}] "
+            f"L1: {val_metrics['l1']:.4f} "
+            f"SSIM: {val_metrics['ssim']:.4f} "
+            f"LPIPS: {val_metrics['lpips']:.4f}"
+            )
+
+        if val_metrics["lpips"] < best_val_lpips:
+            best_val_lpips = val_metrics["lpips"]
+            best_checkpoint_path = (CHECKPOINT_DIR / f"test{TEST_NUM}_best_lpips.pt")
+
+            torch.save(
+                    {
+                        "epoch": epoch,
+                        "generator": generator.state_dict(),
+                        "discriminator": discriminator.state_dict(),
+                        "optimizer_G": optimizer_G.state_dict(),
+                        "optimizer_D": optimizer_D.state_dict(),
+                        "val_metrics": val_metrics,
+                        "config": {
+                            "img_size": IMG_SIZE,
+                            "batch_size": BATCH_SIZE,
+                            "lambda_recon": LAMBDA_RECON,
+                            "lr_generator": LR_GEN,
+                            "lr_discriminator": LR_DISC,
+                            "split_seed": SPLIT_SEED,
+                            "val_ratio": VAL_RATIO,
+                        },
+                    },
+                    best_checkpoint_path,
+                )
+            print(
+                    f"Best checkpoint saved: "
+                    f"epoch={epoch}, "
+                    f"LPIPS={best_val_lpips:.4f}"
+                )
+            
         if epoch % SAVE_INTERVAL == 0:
             generator.eval()
 
