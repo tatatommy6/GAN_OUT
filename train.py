@@ -5,10 +5,9 @@ from models.discriminator import Discriminator
 from torch.utils.data import DataLoader, Subset
 from torchmetrics.image import StructuralSimilarityIndexMeasure # 구조적 유사도 지수: 두 이미지의 화질이나 유사도를 느끼게 평가하는 지표
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity # 학습된 지각적 이미지 패치 유사도: 라고 부릅니다. 두 이미지 사이의 거리를 측정하여 사람이 느끼는 시각적 차이와 비슷하게 유사도를 평가하는 딥러닝 기반 지표
-from utils import set_requires_grad, missing_region_L1, save_preview, save_checkpoint, weighted_patch_mean
+from utils import set_requires_grad, missing_region_L1, save_preview, save_checkpoint, weighted_patch_mean, validation
 
 import torch
-import random
 import torch.nn.functional as F
 
 # please check the test number!
@@ -29,54 +28,6 @@ SAVE_INTERVAL = 5
 
 LR_GEN = 1e-4
 LR_DISC = 1e-4
-
-@torch.no_grad()
-def validation(generator, val_loader, device, ssim_metric, lpips_metric):
-    generator.eval()
-
-    ssim_metric.reset()
-    lpips_metric.reset()
-    
-    total_L1 = 0.0
-    total_images = 0.0
-
-    for batch in val_loader:
-        real = batch["real"].to(device)
-        mask = batch["mask"].to(device)
-        gen_input = batch["generator_input"].to(device)
-        generated = generator(gen_input)
-
-        # 보존 영역은 원본을 사용하고 생성 영역만 생성 결과를 사용
-        composite = real * mask + generated * (1.0 - mask)
-
-        batch_size = real.shape[0]
-
-        # 생성 영역에 대해서만 계산되는 L1 값
-        loss_L1 = missing_region_L1(generated, real, mask)
-
-        # ssis는 입력 범위가 [0, 1]이므로 기존 [-1, 1]인 범위를 적절한 범위로 변경
-        composite_01 = ((composite + 1.0) / 2.0).clamp(0, 1)
-        real_01 = ((real + 1.0) / 2.0).clamp(0, 1)
-
-        ssim_metric.update(composite_01, real_01)
-        lpips_metric.update(composite, real)
-
-        total_L1 += loss_L1.item() * batch_size
-        total_images += batch_size
-
-    result = {
-        "l1": total_L1 / total_images,
-        "ssim": ssim_metric.compute().item(),
-        "lpips": lpips_metric.compute().item(),
-        }
-
-    # metric이 GPU tensor를 계속 보관하지 않도록 정리
-    ssim_metric.reset()
-    lpips_metric.reset()
-
-    generator.train()
-    return result
-
 
 def train():
     if torch.cuda.is_available():
@@ -140,7 +91,10 @@ def train():
         drop_last=False,
     )
 
+    # 검증 데이터의 첫번째 배치를 한번만 가져와 고정
     fixed_preview = next(iter(preview_loader))
+
+    # 배치 딕셔너리 안의 모든 텐서를 모델과 같은 장치로 이동
     fixed_preview = {
         key: value.to(device)
         for key, value in fixed_preview.items()
@@ -155,11 +109,16 @@ def train():
     start_epoch = 1
 
     checkpoint_path = (CHECKPOINT_DIR / "test2_size512_batch16_epoch80_recon50_19767pics__epoch015.pt") #이어서 학습 할 때
+    # 체크포인트가 존재하면 모델과 optimizer 상태 복원
     if checkpoint_path.exists():
 
         checkpoint = torch.load(checkpoint_path, map_location = device, weights_only = True)
+
+        # 생성자와 판별자의 학습된 가중치 복원
         generator.load_state_dict(checkpoint["generator"])
         discriminator.load_state_dict(checkpoint["discriminator"])
+
+        # adam의 모멘텀 등 optimizer의 내부 상태도 복원
         optimizer_G.load_state_dict(checkpoint["optimizer_G"])
         optimizer_D.load_state_dict(checkpoint["optimizer_D"])
 
@@ -168,18 +127,18 @@ def train():
         print(f"Checkpoint loaded: epoch {checkpoint['epoch']}")
         print(f"Resume training from epoch {start_epoch}")
 
-    generator = Generator().to(device)
-    discriminator = Discriminator().to(device)
-
+    # 생성 이미지와 정답 이미지의 구조적 유사도를 측정
     ssim_metric = StructuralSimilarityIndexMeasure(
-        data_range=1.0,
+        data_range=1.0, # 입력 이미지 값의 전체 범위
     ).to(device)
 
+    # 사람이 느끼는 시각적 차이를 사전 학습된 AlexNet 특징으로 측정
     lpips_metric = LearnedPerceptualImagePatchSimilarity(
         net_type="alex",
-        normalize=False,
+        normalize=False, # 입력이 이미 [-1, 1] 라고 가정
     ).to(device)
 
+    #lpips는 낮을수록 좋으므로 최고 비교값을 무한대로 설정
     best_val_lpips = float("inf")
 
     #============학습 반복문===========
@@ -203,7 +162,7 @@ def train():
 
             # Autocasting
             with torch.autocast(device_type="cuda", dtype = torch.bfloat16):
-                with torch.no_grad(): #generator로 가짜 이미지 생성
+                with torch.no_grad(): # generator로 가짜 이미지 생성
                     generated = generator(generator_input)
 
                 fake_composite = (real * mask + generated * (1.0 - mask)) # generator 출력 전체를 그대로 discriminator에 넣지 않고 원본 영역과 생성 영역을 합친 최종 이미지를 만듦
@@ -252,6 +211,8 @@ def train():
             f"LPIPS: {val_metrics['lpips']:.4f}"
             )
 
+        # 현재 모델이 지금까지 나온 모델 중 lpips 기준으로 가장 좋은 모델인지 확인 후 저장하는 반복문
+        # validation()에서 게산한 현재 에폭의 lpips가 기존 최저 기록보다 적은지 비교
         if val_metrics["lpips"] < best_val_lpips:
             best_val_lpips = val_metrics["lpips"]
             best_checkpoint_path = (CHECKPOINT_DIR / f"test{TEST_NUM}_best_lpips.pt")

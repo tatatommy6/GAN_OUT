@@ -86,3 +86,50 @@ def weighted_patch_mean(score, mask): # score: [B, 1, 31, 31], mask: [B, 1, 512,
     weight = 0.25 + 1.0 * hole + 0.5 * boundray # 생성 영역은 일반 영역보다 5배, 경계는 3배 중요하게 반영
 
     return (score * weight).sum() / weight.sum().clamp_min(1e-6) # 가중치를 곱한 뒤 평균을 냄
+
+@torch.no_grad()
+def validation(generator, val_loader, device, ssim_metric, lpips_metric):
+    generator.eval()
+
+    ssim_metric.reset()
+    lpips_metric.reset()
+    
+    total_L1 = 0.0
+    total_images = 0.0
+
+    for batch in val_loader:
+        real = batch["real"].to(device)
+        mask = batch["mask"].to(device)
+        gen_input = batch["generator_input"].to(device)
+        generated = generator(gen_input)
+
+        # 보존 영역은 원본을 사용하고 생성 영역만 생성 결과를 사용
+        composite = real * mask + generated * (1.0 - mask)
+
+        batch_size = real.shape[0]
+
+        # 생성 영역에 대해서만 계산되는 L1 값
+        loss_L1 = missing_region_L1(generated, real, mask)
+
+        # ssis는 입력 범위가 [0, 1]이므로 기존 [-1, 1]인 범위를 적절한 범위로 변경
+        composite_01 = ((composite + 1.0) / 2.0).clamp(0, 1)
+        real_01 = ((real + 1.0) / 2.0).clamp(0, 1)
+
+        ssim_metric.update(composite_01, real_01)
+        lpips_metric.update(composite, real)
+
+        total_L1 += loss_L1.item() * batch_size
+        total_images += batch_size
+
+    result = {
+        "l1": total_L1 / total_images,
+        "ssim": ssim_metric.compute().item(),
+        "lpips": lpips_metric.compute().item(),
+        }
+
+    # metric이 GPU tensor를 계속 보관하지 않도록 정리
+    ssim_metric.reset()
+    lpips_metric.reset()
+
+    generator.train()
+    return result
