@@ -155,6 +155,7 @@ def train():
             mask = batch["mask"].to(device) # shape: [8, 1, 256, 256]
             masked = batch["masked"].to(device) # shpae: [8,3,256,256]
             generator_input = batch["generator_input"].to(device) # shpae: [8,4,256,256]
+            
             #===========training dicriminator===========
             # D 값이 양수로 클수록 진짜라고 판단, 음수로 작을수록 가짜라고 판단
             set_requires_grad(discriminator, True) # 모든 파라미터에 requires_grad 옵션 True로 설정
@@ -178,7 +179,6 @@ def train():
             optimizer_D.step() # 파라미터 업데이트
 
             #===========training generator===========
-
             set_requires_grad(discriminator, False) # generator 학습하는 동안 discriminator 파라미터가 업데이트 되지 않도록 동결
             optimizer_G.zero_grad(set_to_none=True) # 이전 배치에서 생성자에 남아있는 gradient를 초기화함
             with torch.autocast(device_type="cuda", dtype = torch.bfloat16): # 내부 연산 일부를 bfloat16으로 실행하여 GPU 메모리 사용량을 줄이고 연산 속도를 높임

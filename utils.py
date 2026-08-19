@@ -87,26 +87,33 @@ def weighted_patch_mean(score, mask): # score: [B, 1, 31, 31], mask: [B, 1, 512,
 
     return (score * weight).sum() / weight.sum().clamp_min(1e-6) # 가중치를 곱한 뒤 평균을 냄
 
-@torch.no_grad()
+@torch.no_grad() # 평가할거니까 gradient를 계산하거나 저장하지 않도록 함
 def validation(generator, val_loader, device, ssim_metric, lpips_metric):
-    generator.eval()
+    generator.eval() # 평가모드로 전환
 
+    # 이전 검증 결과가 남아 있을 수 있으므로 초기화
     ssim_metric.reset()
     lpips_metric.reset()
     
     total_L1 = 0.0
     total_images = 0.0
 
+    # 검증 DataLoader에 들어있는 모든 배치를 순서대로 평가
     for batch in val_loader:
-        real = batch["real"].to(device)
+
+        # 필요한 텐서를 꺼내 모델과 같은 장치로 이동
+        real = batch["real"].to(device) 
         mask = batch["mask"].to(device)
         gen_input = batch["generator_input"].to(device)
+
+        # 가려진 이미지를 생성자에 입력하여 복원 이미지 생성
         generated = generator(gen_input)
 
         # 보존 영역은 원본을 사용하고 생성 영역만 생성 결과를 사용
         composite = real * mask + generated * (1.0 - mask)
 
-        batch_size = real.shape[0]
+        # 이미지 텐서의 형태: [배치 크기, 채널, 높이, 너비]. real.shape[0] 은 현재 배치에 포함된 이미지 개수
+        batch_size = real.shape[0] 
 
         # 생성 영역에 대해서만 계산되는 L1 값
         loss_L1 = missing_region_L1(generated, real, mask)
